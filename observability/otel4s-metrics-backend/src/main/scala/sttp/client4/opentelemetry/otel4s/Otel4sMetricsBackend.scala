@@ -28,6 +28,8 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.chaining._
 
 object Otel4sMetricsBackend {
+  private val IdPlaceholder = "{id}"
+  private val IdRegex = """[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\d+""".r
 
   def apply[F[_]: Async: MeterProvider](
       delegate: Backend[F],
@@ -216,24 +218,30 @@ object Otel4sMetricsBackend {
       }
 
     private def urlTemplate(request: GenericRequest[_, _]): Option[String] = {
-      val ID = "{id}"
-      val IdRegex = """([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\d+)""".r
+      val rawSegments = request.uri.pathSegments.segments
+      val templatedSegments = rawSegments.map(s => if (IdRegex.matches(s.v)) IdPlaceholder else s.v)
+      val pathChanged = rawSegments.zip(templatedSegments).exists { case (s, t) => s.v != t }
 
-      val pathPart = "/" + request.uri.pathSegments.segments
-        .map(s => if (IdRegex.matches(s.v)) ID else s.v)
-        .mkString("/")
-
-      val queryParts = request.uri.querySegments.map {
-        case Uri.QuerySegment.KeyValue(k, v, _, _) =>
-          s"$k=${if (IdRegex.matches(v)) ID else v}"
-        case Uri.QuerySegment.Value(v, _) =>
-          if (IdRegex.matches(v)) ID else v
-        case Uri.QuerySegment.Plain(v, _) =>
-          IdRegex.replaceAllIn(v, ID)
+      val rawQueryParts = request.uri.querySegments.map {
+        case Uri.QuerySegment.KeyValue(k, v, _, _) => s"$k=$v"
+        case Uri.QuerySegment.Value(v, _)          => v
+        case Uri.QuerySegment.Plain(v, _)          => v
       }
+      val templatedQueryParts = request.uri.querySegments.map {
+        case Uri.QuerySegment.KeyValue(k, v, _, _) =>
+          s"$k=${if (IdRegex.matches(v)) IdPlaceholder else v}"
+        case Uri.QuerySegment.Value(v, _) =>
+          if (IdRegex.matches(v)) IdPlaceholder else v
+        case Uri.QuerySegment.Plain(v, _) =>
+          IdRegex.replaceAllIn(v, IdPlaceholder)
+      }
+      val queryChanged = rawQueryParts != templatedQueryParts
 
-      val queryPart = if (queryParts.isEmpty) "" else "?" + queryParts.mkString("&")
-      Some(pathPart + queryPart)
+      if (pathChanged || queryChanged) {
+        val pathPart = "/" + templatedSegments.mkString("/")
+        val queryPart = if (templatedQueryParts.isEmpty) "" else "?" + templatedQueryParts.mkString("&")
+        Some(pathPart + queryPart)
+      } else None
     }
   }
 
