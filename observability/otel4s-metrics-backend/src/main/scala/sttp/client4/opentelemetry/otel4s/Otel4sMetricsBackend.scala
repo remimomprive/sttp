@@ -18,9 +18,10 @@ import org.typelevel.otel4s.semconv.attributes.{
   ServerAttributes,
   UrlAttributes
 }
+import org.typelevel.otel4s.semconv.experimental.attributes.UrlExperimentalAttributes
 import sttp.client4.listener.{ListenerBackend, RequestListener}
 import sttp.client4._
-import sttp.model.{HttpVersion, ResponseMetadata, StatusCode}
+import sttp.model.{HttpVersion, ResponseMetadata, StatusCode, Uri}
 import sttp.client4.wrappers.FollowRedirectsBackend
 
 import scala.concurrent.duration.FiniteDuration
@@ -173,6 +174,7 @@ object Otel4sMetricsBackend {
       b ++= ServerAttributes.ServerAddress.maybe(request.uri.host)
       b ++= ServerAttributes.ServerPort.maybe(request.uri.port.map(_.toLong))
       b ++= UrlAttributes.UrlScheme.maybe(request.uri.scheme)
+      b ++= UrlExperimentalAttributes.UrlTemplate.maybe(urlTemplate(request))
 
       b.result()
     }
@@ -196,6 +198,7 @@ object Otel4sMetricsBackend {
       b ++= ServerAttributes.ServerPort.maybe(request.uri.port.map(_.toLong))
       b ++= NetworkAttributes.NetworkProtocolVersion.maybe(request.httpVersion.map(networkProtocol))
       b ++= UrlAttributes.UrlScheme.maybe(request.uri.scheme)
+      b ++= UrlExperimentalAttributes.UrlTemplate.maybe(urlTemplate(request))
 
       // response
       b ++= HttpAttributes.HttpResponseStatusCode.maybe(responseStatusCode.map(_.code.toLong))
@@ -211,6 +214,27 @@ object Otel4sMetricsBackend {
         case HttpVersion.HTTP_2   => "2"
         case HttpVersion.HTTP_3   => "3"
       }
+
+    private def urlTemplate(request: GenericRequest[_, _]): Option[String] = {
+      val ID = "{id}"
+      val IdRegex = """([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\d+)""".r
+
+      val pathPart = "/" + request.uri.pathSegments.segments
+        .map(s => if (IdRegex.matches(s.v)) ID else s.v)
+        .mkString("/")
+
+      val queryParts = request.uri.querySegments.map {
+        case Uri.QuerySegment.KeyValue(k, v, _, _) =>
+          s"$k=${if (IdRegex.matches(v)) ID else v}"
+        case Uri.QuerySegment.Value(v, _) =>
+          if (IdRegex.matches(v)) ID else v
+        case Uri.QuerySegment.Plain(v, _) =>
+          IdRegex.replaceAllIn(v, ID)
+      }
+
+      val queryPart = if (queryParts.isEmpty) "" else "?" + queryParts.mkString("&")
+      Some(pathPart + queryPart)
+    }
   }
 
 }
